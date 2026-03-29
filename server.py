@@ -53,8 +53,6 @@ def book_appointment(patient_id: str, slot_id: str) -> dict:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    mcp.run(
-        transport="sse",
-        host="0.0.0.0",
-        port=port
-    )
+    mcp.settings.host = "0.0.0.0"
+    mcp.settings.port = port
+    mcp.run(transport="sse")
