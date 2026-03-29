@@ -1,7 +1,13 @@
 import os
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
-mcp = FastMCP("Demo MCP")
+mcp = FastMCP(
+    "Demo MCP",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+)
 
 patients = [
     {"patient_id": "p1", "name": "Anders Jensen", "phone": "12345678"}
