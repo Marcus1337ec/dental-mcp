@@ -1,6 +1,10 @@
 import os
+import json
+from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 mcp = FastMCP(
     "Dental MCP",
@@ -9,59 +13,126 @@ mcp = FastMCP(
     )
 )
 
-patients = [
-    {"patient_id": "p1", "name": "Anders Jensen", "phone": "12345678"}
-]
+CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID")
+SERVICE_ACCOUNT_FILE = "/etc/secrets/service-account.json"
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-slots = [
-    {"slot_id": "s1", "date": "mandag", "time": "09:00", "booked": False},
-    {"slot_id": "s2", "date": "mandag", "time": "11:30", "booked": False},
-    {"slot_id": "s3", "date": "tirsdag", "time": "10:00", "booked": False},
-    {"slot_id": "s4", "date": "tirsdag", "time": "14:00", "booked": False},
-    {"slot_id": "s5", "date": "onsdag", "time": "09:30", "booked": False},
-]
+def get_calendar_service():
+    creds = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
+    return build("googleapiclient", "calendar", "v3", credentials=creds)
 
 @mcp.tool()
 def find_patient(name: str, phone: str) -> dict:
-    """Find en patient baseret på navn og telefonnummer"""
+    """Find eller opret en patient"""
     print(f"[TOOL] find_patient: name={name}, phone={phone}")
-    name_clean = name.strip().lower()
-    phone_clean = phone.strip().replace(" ", "")
-    for p in patients:
-        if p["name"].lower() == name_clean and p["phone"].replace(" ", "") == phone_clean:
-            return {"found": True, "patient": p}
-    # Opret ny patient automatisk
-    new_id = f"p{len(patients)+1}"
-    new_patient = {"patient_id": new_id, "name": name.strip(), "phone": phone_clean}
-    patients.append(new_patient)
-    return {"found": False, "new_patient_created": True, "patient": new_patient}
+    return {
+        "found": True,
+        "patient": {
+            "patient_id": f"p_{phone}",
+            "name": name,
+            "phone": phone
+        }
+    }
 
 @mcp.tool()
 def get_available_times(preferred_day: str = "") -> dict:
-    """Returner ledige tider, evt. filtreret på dag"""
+    """Hent ledige tider fra Google Calendar"""
     print(f"[TOOL] get_available_times: preferred_day={preferred_day}")
-    available = [s for s in slots if not s["booked"]]
-    if preferred_day:
-        day_clean = preferred_day.strip().lower()
-        filtered = [s for s in available if day_clean in s["date"].lower()]
-        if filtered:
-            available = filtered
-    if not available:
-        return {"available_times": [], "message": "Ingen ledige tider"}
-    return {"available_times": available}
+    try:
+        service = get_calendar_service()
+        now = datetime.utcnow()
+        time_min = now.isoformat() + "Z"
+        time_max = (now + timedelta(days=7)).isoformat() + "Z"
+        events_result = service.events().list(
+            calendarId=CALENDAR_ID,
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+        events = events_result.get("items", [])
+        available = []
+        for event in events:
+            if event.get("summary", "").lower() == "ledig tid":
+                start = event["start"].get("dateTime", "")
+                slot_id = event["id"]
+                if preferred_day:
+                    if preferred_day.lower() not in start.lower():
+                        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                        danish_days = {
+                            "monday": "mandag", "tuesday": "tirsdag",
+                            "wednesday": "onsdag", "thursday": "torsdag",
+                            "friday": "fredag"
+                        }
+                        day_name = danish_days.get(dt.strftime("%A").lower(), "")
+                        if preferred_day.lower() not in day_name:
+                            continue
+                available.append({
+                    "slot_id": slot_id,
+                    "start": start,
+                    "display": datetime.fromisoformat(
+                        start.replace("Z", "+00:00")
+                    ).strftime("%A den %d/%m kl. %H:%M")
+                })
+        if not available:
+            return {"available_times": [], "message": "Ingen ledige tider fundet"}
+        return {"available_times": available}
+    except Exception as e:
+        print(f"[ERROR] get_available_times: {e}")
+        return {"error": str(e)}
 
 @mcp.tool()
-def book_appointment(patient_id: str, slot_id: str) -> dict:
-    """Book en tid til en patient"""
-    print(f"[TOOL] book_appointment: patient_id={patient_id}, slot_id={slot_id}")
-    for s in slots:
-        if s["slot_id"] == slot_id and not s["booked"]:
-            s["booked"] = True
-            return {
-                "success": True,
-                "message": f"Tid booket: {s['date']} kl. {s['time']}"
-            }
-    return {"success": False, "message": "Tid ikke tilgængelig"}
+def book_appointment(patient_id: str, patient_name: str, slot_id: str) -> dict:
+    """Book en ledig tid ved at opdatere begivenheden i Google Calendar"""
+    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}")
+    try:
+        service = get_calendar_service()
+        event = service.events().get(
+            calendarId=CALENDAR_ID,
+            eventId=slot_id
+        ).execute()
+        event["summary"] = patient_name
+        event["description"] = f"Patient ID: {patient_id}"
+        updated_event = service.events().update(
+            calendarId=CALENDAR_ID,
+            eventId=slot_id,
+            body=event
+        ).execute()
+        start = updated_event["start"].get("dateTime", "")
+        display = datetime.fromisoformat(
+            start.replace("Z", "+00:00")
+        ).strftime("%A den %d/%m kl. %H:%M")
+        return {
+            "success": True,
+            "message": f"Booket til {patient_name} — {display}"
+        }
+    except Exception as e:
+        print(f"[ERROR] book_appointment: {e}")
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+def cancel_appointment(slot_id: str) -> dict:
+    """Aflys en booking ved at sætte titlen tilbage til Ledig tid"""
+    print(f"[TOOL] cancel_appointment: slot={slot_id}")
+    try:
+        service = get_calendar_service()
+        event = service.events().get(
+            calendarId=CALENDAR_ID,
+            eventId=slot_id
+        ).execute()
+        event["summary"] = "Ledig tid"
+        event["description"] = ""
+        service.events().update(
+            calendarId=CALENDAR_ID,
+            eventId=slot_id,
+            body=event
+        ).execute()
+        return {"success": True, "message": "Tid aflyst — sat tilbage til ledig"}
+    except Exception as e:
+        print(f"[ERROR] cancel_appointment: {e}")
+        return {"success": False, "error": str(e)}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
