@@ -1,5 +1,4 @@
 import os
-import json
 from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -21,7 +20,7 @@ def get_calendar_service():
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
-    return build("googleapiclient", "calendar", "v3", credentials=creds)
+    return build("calendar", "v3", credentials=creds)
 
 @mcp.tool()
 def find_patient(name: str, phone: str) -> dict:
@@ -59,16 +58,15 @@ def get_available_times(preferred_day: str = "") -> dict:
                 start = event["start"].get("dateTime", "")
                 slot_id = event["id"]
                 if preferred_day:
-                    if preferred_day.lower() not in start.lower():
-                        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                        danish_days = {
-                            "monday": "mandag", "tuesday": "tirsdag",
-                            "wednesday": "onsdag", "thursday": "torsdag",
-                            "friday": "fredag"
-                        }
-                        day_name = danish_days.get(dt.strftime("%A").lower(), "")
-                        if preferred_day.lower() not in day_name:
-                            continue
+                    dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                    danish_days = {
+                        "monday": "mandag", "tuesday": "tirsdag",
+                        "wednesday": "onsdag", "thursday": "torsdag",
+                        "friday": "fredag"
+                    }
+                    day_name = danish_days.get(dt.strftime("%A").lower(), "")
+                    if preferred_day.lower() not in day_name:
+                        continue
                 available.append({
                     "slot_id": slot_id,
                     "start": start,
@@ -81,7 +79,7 @@ def get_available_times(preferred_day: str = "") -> dict:
         return {"available_times": available}
     except Exception as e:
         print(f"[ERROR] get_available_times: {e}")
-        return {"error": str(e)}
+        return {"error": str(e), "message": "Teknisk fejl ved hentning af tider"}
 
 @mcp.tool()
 def book_appointment(patient_id: str, patient_name: str, slot_id: str) -> dict:
