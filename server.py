@@ -1,6 +1,8 @@
 import os
 import json
 import base64
+import threading
+import urllib.request
 from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -24,6 +26,17 @@ def get_calendar_service():
         creds_json, scopes=SCOPES
     )
     return build("calendar", "v3", credentials=creds)
+
+def keep_alive():
+    while True:
+        import time
+        time.sleep(840)
+        try:
+            urllib.request.urlopen("https://dental-mcp.onrender.com/mcp")
+        except:
+            pass
+
+threading.Thread(target=keep_alive, daemon=True).start()
 
 @mcp.tool()
 def find_patient(name: str, phone: str) -> dict:
