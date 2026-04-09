@@ -1,4 +1,6 @@
 import os
+import json
+import base64
 from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -13,12 +15,13 @@ mcp = FastMCP(
 )
 
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID")
-SERVICE_ACCOUNT_FILE = "/etc/secrets/service-account.json"
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 def get_calendar_service():
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    creds_b64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
+    creds_json = json.loads(base64.b64decode(creds_b64).decode("utf-8"))
+    creds = service_account.Credentials.from_service_account_info(
+        creds_json, scopes=SCOPES
     )
     return build("calendar", "v3", credentials=creds)
 
