@@ -51,6 +51,7 @@ def init_db():
             clinic_id INTEGER REFERENCES clinics(id),
             calendar_event_id TEXT,
             appointment_time TIMESTAMP,
+            purpose TEXT,
             status TEXT DEFAULT 'booked',
             created_at TIMESTAMP DEFAULT NOW()
         );
@@ -111,6 +112,7 @@ def find_patient(name: str, phone: str) -> dict:
             conn.close()
             return {
                 "found": True,
+                "is_new_patient": False,
                 "patient": dict(patient)
             }
         cur.execute("""
@@ -125,7 +127,7 @@ def find_patient(name: str, phone: str) -> dict:
         print(f"[DB] Ny patient oprettet: {name}")
         return {
             "found": False,
-            "new_patient": True,
+            "is_new_patient": True,
             "patient": dict(new_patient)
         }
     except Exception as e:
@@ -179,9 +181,9 @@ def get_available_times(preferred_day: str = "") -> dict:
         return {"error": str(e), "message": "Teknisk fejl ved hentning af tider"}
 
 @mcp.tool()
-def book_appointment(patient_id: int, patient_name: str, slot_id: str) -> dict:
-    """Book en ledig tid og gem i database"""
-    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}")
+def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False) -> dict:
+    """Book en ledig tid og gem i database med formål og patientstatus"""
+    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, new={is_new_patient}")
     try:
         service = get_calendar_service()
         event = service.events().get(
@@ -189,7 +191,11 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str) -> dict:
             eventId=slot_id
         ).execute()
         event["summary"] = patient_name
-        event["description"] = f"Patient ID: {patient_id}"
+        if is_new_patient:
+            description = f"NY PATIENT — første besøg\nFormål: {purpose if purpose else 'Ikke angivet'}"
+        else:
+            description = f"Kendt patient\nFormål: {purpose if purpose else 'Ikke angivet'}"
+        event["description"] = description
         updated_event = service.events().update(
             calendarId=CALENDAR_ID,
             eventId=slot_id,
@@ -201,9 +207,9 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str) -> dict:
         conn = get_db()
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO bookings (patient_id, clinic_id, calendar_event_id, appointment_time, status)
-            VALUES (%s, 1, %s, %s, 'booked')
-        """, (patient_id, slot_id, appointment_time))
+            INSERT INTO bookings (patient_id, clinic_id, calendar_event_id, appointment_time, purpose, status)
+            VALUES (%s, 1, %s, %s, %s, 'booked')
+        """, (patient_id, slot_id, appointment_time, purpose))
         conn.commit()
         cur.close()
         conn.close()
