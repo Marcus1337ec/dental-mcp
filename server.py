@@ -43,7 +43,8 @@ def init_db():
             phone TEXT NOT NULL,
             email TEXT,
             created_by TEXT DEFAULT 'sofia',
-            created_at TIMESTAMP DEFAULT NOW()
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(clinic_id, phone)
         );
         CREATE TABLE IF NOT EXISTS bookings (
             id SERIAL PRIMARY KEY,
@@ -51,11 +52,25 @@ def init_db():
             clinic_id INTEGER REFERENCES clinics(id),
             calendar_event_id TEXT,
             appointment_time TIMESTAMP,
+            purpose TEXT,
             status TEXT DEFAULT 'booked',
             created_at TIMESTAMP DEFAULT NOW()
         );
     """)
     cur.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS purpose TEXT;")
+    cur.execute("""
+        ALTER TABLE patients
+        ADD CONSTRAINT IF NOT EXISTS patients_clinic_phone_unique
+        UNIQUE (clinic_id, phone);
+    """)
+    cur.execute("""
+        DELETE FROM patients
+        WHERE id NOT IN (
+            SELECT MIN(id)
+            FROM patients
+            GROUP BY clinic_id, phone
+        );
+    """)
     cur.execute("""
         INSERT INTO clinics (id, name, phone, email)
         VALUES (1, 'Tandlæge Test Klinik', '12345678', 'test@tandlaege.dk')
@@ -67,12 +82,12 @@ def init_db():
             (1, 'Anders Jensen', '12345678', 'import'),
             (1, 'Mette Hansen', '87654321', 'import'),
             (1, 'Lars Nielsen', '11223344', 'import')
-        ON CONFLICT DO NOTHING;
+        ON CONFLICT (clinic_id, phone) DO NOTHING;
     """)
     conn.commit()
     cur.close()
     conn.close()
-    print("[DB] Database initialiseret")
+    print("[DB] Database initialiseret og duplikater fjernet")
 
 def get_calendar_service():
     creds_b64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
@@ -118,6 +133,7 @@ def find_patient(name: str, phone: str) -> dict:
         cur.execute("""
             INSERT INTO patients (clinic_id, name, phone, created_by)
             VALUES (1, %s, %s, 'sofia')
+            ON CONFLICT (clinic_id, phone) DO UPDATE SET name = EXCLUDED.name
             RETURNING id, name, phone, clinic_id, created_by
         """, (name.strip(), phone_clean))
         new_patient = cur.fetchone()
