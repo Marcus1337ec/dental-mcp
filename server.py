@@ -51,11 +51,11 @@ def init_db():
             clinic_id INTEGER REFERENCES clinics(id),
             calendar_event_id TEXT,
             appointment_time TIMESTAMP,
-            purpose TEXT,
             status TEXT DEFAULT 'booked',
             created_at TIMESTAMP DEFAULT NOW()
         );
     """)
+    cur.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS purpose TEXT;")
     cur.execute("""
         INSERT INTO clinics (id, name, phone, email)
         VALUES (1, 'Tandlæge Test Klinik', '12345678', 'test@tandlaege.dk')
