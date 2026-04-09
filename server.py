@@ -43,8 +43,7 @@ def init_db():
             phone TEXT NOT NULL,
             email TEXT,
             created_by TEXT DEFAULT 'sofia',
-            created_at TIMESTAMP DEFAULT NOW(),
-            UNIQUE(clinic_id, phone)
+            created_at TIMESTAMP DEFAULT NOW()
         );
         CREATE TABLE IF NOT EXISTS bookings (
             id SERIAL PRIMARY KEY,
@@ -60,7 +59,11 @@ def init_db():
     cur.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS purpose TEXT;")
     cur.execute("""
         ALTER TABLE patients
-        ADD CONSTRAINT IF NOT EXISTS patients_clinic_phone_unique
+        DROP CONSTRAINT IF EXISTS patients_clinic_phone_unique;
+    """)
+    cur.execute("""
+        ALTER TABLE patients
+        ADD CONSTRAINT patients_clinic_phone_unique
         UNIQUE (clinic_id, phone);
     """)
     cur.execute("""
