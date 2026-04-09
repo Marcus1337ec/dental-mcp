@@ -62,17 +62,17 @@ def init_db():
         DROP CONSTRAINT IF EXISTS patients_clinic_phone_unique;
     """)
     cur.execute("""
-        ALTER TABLE patients
-        ADD CONSTRAINT patients_clinic_phone_unique
-        UNIQUE (clinic_id, phone);
-    """)
-    cur.execute("""
         DELETE FROM patients
         WHERE id NOT IN (
             SELECT MIN(id)
             FROM patients
             GROUP BY clinic_id, phone
         );
+    """)
+    cur.execute("""
+        ALTER TABLE patients
+        ADD CONSTRAINT patients_clinic_phone_unique
+        UNIQUE (clinic_id, phone);
     """)
     cur.execute("""
         INSERT INTO clinics (id, name, phone, email)
