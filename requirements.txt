@@ -3,3 +3,4 @@ uvicorn
 google-auth
 google-auth-oauthlib
 google-api-python-client
+psycopg2-binary
