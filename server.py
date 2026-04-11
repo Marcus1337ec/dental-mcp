@@ -36,6 +36,12 @@ def init_db():
             email TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         );
+        CREATE TABLE IF NOT EXISTS dentists (
+            id SERIAL PRIMARY KEY,
+            clinic_id INTEGER REFERENCES clinics(id),
+            name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
         CREATE TABLE IF NOT EXISTS patients (
             id SERIAL PRIMARY KEY,
             clinic_id INTEGER REFERENCES clinics(id),
@@ -52,11 +58,13 @@ def init_db():
             calendar_event_id TEXT,
             appointment_time TIMESTAMP,
             purpose TEXT,
+            dentist_name TEXT,
             status TEXT DEFAULT 'booked',
             created_at TIMESTAMP DEFAULT NOW()
         );
     """)
     cur.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS purpose TEXT;")
+    cur.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS dentist_name TEXT;")
     cur.execute("""
         ALTER TABLE patients
         DROP CONSTRAINT IF EXISTS patients_clinic_phone_unique;
@@ -87,6 +95,13 @@ def init_db():
             (1, 'Lars Nielsen', '11223344', 'import')
         ON CONFLICT (clinic_id, phone) DO NOTHING;
     """)
+    cur.execute("""
+        INSERT INTO dentists (clinic_id, name)
+        VALUES 
+            (1, 'Dr. Hansen'),
+            (1, 'Dr. Nielsen')
+        ON CONFLICT DO NOTHING;
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -110,6 +125,22 @@ def keep_alive():
             pass
 
 threading.Thread(target=keep_alive, daemon=True).start()
+
+@mcp.tool()
+def get_dentists() -> dict:
+    """Hent liste over tandlæger på klinikken"""
+    print("[TOOL] get_dentists")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, name FROM dentists WHERE clinic_id = 1")
+        dentists = cur.fetchall()
+        cur.close()
+        conn.close()
+        return {"dentists": [dict(d) for d in dentists]}
+    except Exception as e:
+        print(f"[ERROR] get_dentists: {e}")
+        return {"error": str(e)}
 
 @mcp.tool()
 def find_patient(name: str, phone: str) -> dict:
@@ -154,9 +185,9 @@ def find_patient(name: str, phone: str) -> dict:
         return {"error": str(e)}
 
 @mcp.tool()
-def get_available_times(preferred_day: str = "") -> dict:
-    """Hent ledige tider fra Google Calendar"""
-    print(f"[TOOL] get_available_times: preferred_day={preferred_day}")
+def get_available_times(preferred_day: str = "", dentist_name: str = "") -> dict:
+    """Hent ledige tider fra Google Calendar — filtrer på dag og/eller tandlæge"""
+    print(f"[TOOL] get_available_times: preferred_day={preferred_day}, dentist={dentist_name}")
     try:
         service = get_calendar_service()
         now = datetime.utcnow()
@@ -172,26 +203,33 @@ def get_available_times(preferred_day: str = "") -> dict:
         events = events_result.get("items", [])
         available = []
         for event in events:
-            if event.get("summary", "").lower() == "ledig tid":
-                start = event["start"].get("dateTime", "")
-                slot_id = event["id"]
-                if preferred_day:
-                    dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                    danish_days = {
-                        "monday": "mandag", "tuesday": "tirsdag",
-                        "wednesday": "onsdag", "thursday": "torsdag",
-                        "friday": "fredag"
-                    }
-                    day_name = danish_days.get(dt.strftime("%A").lower(), "")
-                    if preferred_day.lower() not in day_name:
-                        continue
-                available.append({
-                    "slot_id": slot_id,
-                    "start": start,
-                    "display": datetime.fromisoformat(
-                        start.replace("Z", "+00:00")
-                    ).strftime("%A den %d/%m kl. %H:%M")
-                })
+            title = event.get("summary", "").lower()
+            if not title.startswith("ledig tid"):
+                continue
+            if dentist_name:
+                if dentist_name.lower() not in title:
+                    continue
+            start = event["start"].get("dateTime", "")
+            slot_id = event["id"]
+            if preferred_day:
+                dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                danish_days = {
+                    "monday": "mandag", "tuesday": "tirsdag",
+                    "wednesday": "onsdag", "thursday": "torsdag",
+                    "friday": "fredag"
+                }
+                day_name = danish_days.get(dt.strftime("%A").lower(), "")
+                if preferred_day.lower() not in day_name:
+                    continue
+            display_title = event.get("summary", "Ledig tid")
+            available.append({
+                "slot_id": slot_id,
+                "start": start,
+                "dentist": display_title.replace("Ledig tid", "").replace("-", "").strip() or "Første ledige",
+                "display": datetime.fromisoformat(
+                    start.replace("Z", "+00:00")
+                ).strftime("%A den %d/%m kl. %H:%M")
+            })
         if not available:
             return {"available_times": [], "message": "Ingen ledige tider fundet"}
         return {"available_times": available}
@@ -200,9 +238,9 @@ def get_available_times(preferred_day: str = "") -> dict:
         return {"error": str(e), "message": "Teknisk fejl ved hentning af tider"}
 
 @mcp.tool()
-def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False) -> dict:
+def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False, dentist_name: str = "") -> dict:
     """Book en ledig tid og gem i database med formål og patientstatus"""
-    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, new={is_new_patient}")
+    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, dentist={dentist_name}")
     try:
         service = get_calendar_service()
         event = service.events().get(
@@ -211,9 +249,9 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         ).execute()
         event["summary"] = patient_name
         if is_new_patient:
-            description = f"NY PATIENT — første besøg\nFormål: {purpose if purpose else 'Ikke angivet'}"
+            description = f"NY PATIENT — første besøg\nFormål: {purpose if purpose else 'Ikke angivet'}\nTandlæge: {dentist_name if dentist_name else 'Første ledige'}"
         else:
-            description = f"Kendt patient\nFormål: {purpose if purpose else 'Ikke angivet'}"
+            description = f"Kendt patient\nFormål: {purpose if purpose else 'Ikke angivet'}\nTandlæge: {dentist_name if dentist_name else 'Første ledige'}"
         event["description"] = description
         updated_event = service.events().update(
             calendarId=CALENDAR_ID,
@@ -226,9 +264,9 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         conn = get_db()
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO bookings (patient_id, clinic_id, calendar_event_id, appointment_time, purpose, status)
-            VALUES (%s, 1, %s, %s, %s, 'booked')
-        """, (patient_id, slot_id, appointment_time, purpose))
+            INSERT INTO bookings (patient_id, clinic_id, calendar_event_id, appointment_time, purpose, dentist_name, status)
+            VALUES (%s, 1, %s, %s, %s, %s, 'booked')
+        """, (patient_id, slot_id, appointment_time, purpose, dentist_name))
         conn.commit()
         cur.close()
         conn.close()
