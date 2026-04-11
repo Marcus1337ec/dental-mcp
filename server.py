@@ -225,9 +225,9 @@ def get_patient_bookings(patient_id: int) -> dict:
         return {"error": str(e)}
 
 @mcp.tool()
-def get_available_times(preferred_day: str = "", dentist_name: str = "") -> dict:
-    """Hent ledige tider fra Google Calendar — filtrer på dag og/eller tandlæge"""
-    print(f"[TOOL] get_available_times: preferred_day={preferred_day}, dentist={dentist_name}")
+def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude_slot_id: str = "") -> dict:
+    """Hent ledige tider fra Google Calendar — filtrer på dag og/eller tandlæge. exclude_slot_id udelukker en bestemt tid fra resultatet."""
+    print(f"[TOOL] get_available_times: preferred_day={preferred_day}, dentist={dentist_name}, exclude={exclude_slot_id}")
     try:
         service = get_calendar_service()
         now = datetime.utcnow()
@@ -246,11 +246,13 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "") -> dict
             title = event.get("summary", "").lower()
             if not title.startswith("ledig tid"):
                 continue
+            slot_id = event["id"]
+            if exclude_slot_id and slot_id == exclude_slot_id:
+                continue
             if dentist_name:
                 if dentist_name.lower() not in title:
                     continue
             start = event["start"].get("dateTime", "")
-            slot_id = event["id"]
             if preferred_day:
                 dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
                 danish_days = {
@@ -320,7 +322,7 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
 
 @mcp.tool()
 def cancel_appointment(slot_id: str) -> dict:
-    """Aflys en booking i kalender og opdater database"""
+    """Aflys en booking i kalender og opdater database. Returnerer slot_id så den kan ekskluderes fra næste tidsopslag."""
     print(f"[TOOL] cancel_appointment: slot={slot_id}")
     try:
         service = get_calendar_service()
@@ -344,7 +346,11 @@ def cancel_appointment(slot_id: str) -> dict:
         conn.commit()
         cur.close()
         conn.close()
-        return {"success": True, "message": "Tid aflyst — sat tilbage til ledig"}
+        return {
+            "success": True,
+            "cancelled_slot_id": slot_id,
+            "message": "Tid aflyst — sat tilbage til ledig"
+        }
     except Exception as e:
         print(f"[ERROR] cancel_appointment: {e}")
         return {"success": False, "error": str(e)}
