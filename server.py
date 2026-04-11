@@ -185,6 +185,46 @@ def find_patient(name: str, phone: str) -> dict:
         return {"error": str(e)}
 
 @mcp.tool()
+def get_patient_bookings(patient_id: int) -> dict:
+    """Hent patientens kommende bookinger fra databasen"""
+    print(f"[TOOL] get_patient_bookings: patient_id={patient_id}")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT 
+                id,
+                appointment_time,
+                purpose,
+                dentist_name,
+                status,
+                calendar_event_id
+            FROM bookings
+            WHERE patient_id = %s
+            AND status = 'booked'
+            AND appointment_time > NOW()
+            ORDER BY appointment_time ASC
+        """, (patient_id,))
+        bookings = cur.fetchall()
+        cur.close()
+        conn.close()
+        if not bookings:
+            return {
+                "bookings": [],
+                "message": "Ingen kommende bookinger fundet"
+            }
+        result = []
+        for b in bookings:
+            b = dict(b)
+            if b["appointment_time"]:
+                b["display"] = b["appointment_time"].strftime("%A den %d/%m kl. %H:%M")
+            result.append(b)
+        return {"bookings": result}
+    except Exception as e:
+        print(f"[ERROR] get_patient_bookings: {e}")
+        return {"error": str(e)}
+
+@mcp.tool()
 def get_available_times(preferred_day: str = "", dentist_name: str = "") -> dict:
     """Hent ledige tider fra Google Calendar — filtrer på dag og/eller tandlæge"""
     print(f"[TOOL] get_available_times: preferred_day={preferred_day}, dentist={dentist_name}")
