@@ -10,6 +10,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from twilio.rest import Client as TwilioClient
 
 mcp = FastMCP(
     "Dental MCP",
@@ -21,6 +22,10 @@ mcp = FastMCP(
 CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
 
 def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -114,6 +119,44 @@ def get_calendar_service():
         creds_json, scopes=SCOPES
     )
     return build("calendar", "v3", credentials=creds)
+
+def send_sms(to_phone: str, message: str) -> bool:
+    """Send SMS via Twilio. Returnerer True hvis det lykkes."""
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_PHONE_NUMBER:
+        print("[SMS] Twilio ikke konfigureret — skipper SMS")
+        return False
+    try:
+        phone_clean = to_phone.strip().replace(" ", "")
+        if not phone_clean.startswith("+"):
+            if phone_clean.startswith("45"):
+                phone_clean = "+" + phone_clean
+            else:
+                phone_clean = "+45" + phone_clean
+        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        msg = client.messages.create(
+            body=message,
+            from_=TWILIO_PHONE_NUMBER,
+            to=phone_clean
+        )
+        print(f"[SMS] Sendt til {phone_clean} — SID: {msg.sid}")
+        return True
+    except Exception as e:
+        print(f"[SMS ERROR] {e}")
+        return False
+
+def get_patient_phone(patient_id: int) -> str:
+    """Hent patientens telefonnummer fra databasen"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT phone FROM patients WHERE id = %s", (patient_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row["phone"] if row else ""
+    except Exception as e:
+        print(f"[ERROR] get_patient_phone: {e}")
+        return ""
 
 def keep_alive():
     while True:
@@ -281,7 +324,7 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude
 
 @mcp.tool()
 def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False, dentist_name: str = "", moved_from: str = "") -> dict:
-    """Book en ledig tid og gem i database. moved_from bruges hvis tiden er flyttet fra en tidligere aftale."""
+    """Book en ledig tid og gem i database. moved_from bruges hvis tiden er flyttet. Sender SMS-bekræftelse."""
     print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, dentist={dentist_name}, moved_from={moved_from}")
     try:
         service = get_calendar_service()
@@ -322,6 +365,20 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         conn.commit()
         cur.close()
         conn.close()
+        
+        # Send SMS-bekræftelse
+        patient_phone = get_patient_phone(patient_id)
+        if patient_phone:
+            dentist_text = f" hos {dentist_name}" if dentist_name else ""
+            sms_message = (
+                f"Hej {patient_name.split()[0]}! "
+                f"Din tid er bekræftet: {display}{dentist_text}. "
+                f"Formål: {purpose if purpose else 'Ikke angivet'}. "
+                f"Adresse: 3. sal, Nørregade. "
+                f"Vi ses! — Tandlægeklinikken"
+            )
+            send_sms(patient_phone, sms_message)
+        
         return {
             "success": True,
             "message": f"Booket til {patient_name} — {display}"
@@ -332,7 +389,7 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
 
 @mcp.tool()
 def cancel_appointment(slot_id: str) -> dict:
-    """Aflys en booking i kalender og opdater database. Returnerer slot_id så den kan ekskluderes fra næste tidsopslag."""
+    """Aflys en booking i kalender og opdater database. Sender SMS-bekræftelse på aflysning."""
     print(f"[TOOL] cancel_appointment: slot={slot_id}")
     try:
         service = get_calendar_service()
@@ -341,9 +398,23 @@ def cancel_appointment(slot_id: str) -> dict:
             eventId=slot_id
         ).execute()
         original_time = ""
+        patient_name_for_sms = ""
         if event.get("start", {}).get("dateTime"):
             dt = datetime.fromisoformat(event["start"]["dateTime"].replace("Z", "+00:00"))
             original_time = dt.strftime("%A den %d/%m kl. %H:%M")
+        patient_name_for_sms = event.get("summary", "")
+        
+        # Find patient før vi ændrer begivenheden
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT p.phone, p.name 
+            FROM bookings b
+            JOIN patients p ON b.patient_id = p.id
+            WHERE b.calendar_event_id = %s
+        """, (slot_id,))
+        patient_row = cur.fetchone()
+        
         event["summary"] = "Ledig tid"
         event["description"] = ""
         service.events().update(
@@ -351,8 +422,7 @@ def cancel_appointment(slot_id: str) -> dict:
             eventId=slot_id,
             body=event
         ).execute()
-        conn = get_db()
-        cur = conn.cursor()
+        
         cur.execute("""
             UPDATE bookings SET status = 'cancelled'
             WHERE calendar_event_id = %s
@@ -360,6 +430,18 @@ def cancel_appointment(slot_id: str) -> dict:
         conn.commit()
         cur.close()
         conn.close()
+        
+        # Send SMS om aflysning
+        if patient_row and patient_row["phone"]:
+            first_name = patient_row["name"].split()[0] if patient_row["name"] else ""
+            sms_message = (
+                f"Hej {first_name}! "
+                f"Din tid {original_time} er aflyst. "
+                f"Kontakt os hvis du vil booke en ny tid. "
+                f"— Tandlægeklinikken"
+            )
+            send_sms(patient_row["phone"], sms_message)
+        
         return {
             "success": True,
             "cancelled_slot_id": slot_id,
