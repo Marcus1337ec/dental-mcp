@@ -226,13 +226,13 @@ def get_patient_bookings(patient_id: int) -> dict:
 
 @mcp.tool()
 def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude_slot_id: str = "") -> dict:
-    """Hent ledige tider fra Google Calendar — filtrer på dag og/eller tandlæge. exclude_slot_id udelukker en bestemt tid fra resultatet."""
+    """Hent ledige tider fra Google Calendar — op til 30 dage frem. Filtrer på dag og/eller tandlæge."""
     print(f"[TOOL] get_available_times: preferred_day={preferred_day}, dentist={dentist_name}, exclude={exclude_slot_id}")
     try:
         service = get_calendar_service()
         now = datetime.utcnow()
         time_min = now.isoformat() + "Z"
-        time_max = (now + timedelta(days=7)).isoformat() + "Z"
+        time_max = (now + timedelta(days=30)).isoformat() + "Z"
         events_result = service.events().list(
             calendarId=CALENDAR_ID,
             timeMin=time_min,
@@ -280,9 +280,9 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude
         return {"error": str(e), "message": "Teknisk fejl ved hentning af tider"}
 
 @mcp.tool()
-def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False, dentist_name: str = "") -> dict:
-    """Book en ledig tid og gem i database med formål og patientstatus"""
-    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, dentist={dentist_name}")
+def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False, dentist_name: str = "", moved_from: str = "") -> dict:
+    """Book en ledig tid og gem i database. moved_from bruges hvis tiden er flyttet fra en tidligere aftale."""
+    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, dentist={dentist_name}, moved_from={moved_from}")
     try:
         service = get_calendar_service()
         event = service.events().get(
@@ -291,10 +291,17 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         ).execute()
         event["summary"] = patient_name
         if is_new_patient:
-            description = f"NY PATIENT — første besøg\nFormål: {purpose if purpose else 'Ikke angivet'}\nTandlæge: {dentist_name if dentist_name else 'Første ledige'}"
+            status_line = "NY PATIENT — første besøg"
         else:
-            description = f"Kendt patient\nFormål: {purpose if purpose else 'Ikke angivet'}\nTandlæge: {dentist_name if dentist_name else 'Første ledige'}"
-        event["description"] = description
+            status_line = "Kendt patient"
+        description_parts = [
+            status_line,
+            f"Formål: {purpose if purpose else 'Ikke angivet'}",
+            f"Tandlæge: {dentist_name if dentist_name else 'Første ledige'}"
+        ]
+        if moved_from:
+            description_parts.append(f"Flyttet fra: {moved_from}")
+        event["description"] = "\n".join(description_parts)
         updated_event = service.events().update(
             calendarId=CALENDAR_ID,
             eventId=slot_id,
@@ -305,10 +312,13 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         display = appointment_time.strftime("%A den %d/%m kl. %H:%M")
         conn = get_db()
         cur = conn.cursor()
+        final_purpose = purpose
+        if moved_from:
+            final_purpose = f"{purpose} (flyttet fra {moved_from})"
         cur.execute("""
             INSERT INTO bookings (patient_id, clinic_id, calendar_event_id, appointment_time, purpose, dentist_name, status)
             VALUES (%s, 1, %s, %s, %s, %s, 'booked')
-        """, (patient_id, slot_id, appointment_time, purpose, dentist_name))
+        """, (patient_id, slot_id, appointment_time, final_purpose, dentist_name))
         conn.commit()
         cur.close()
         conn.close()
@@ -330,6 +340,10 @@ def cancel_appointment(slot_id: str) -> dict:
             calendarId=CALENDAR_ID,
             eventId=slot_id
         ).execute()
+        original_time = ""
+        if event.get("start", {}).get("dateTime"):
+            dt = datetime.fromisoformat(event["start"]["dateTime"].replace("Z", "+00:00"))
+            original_time = dt.strftime("%A den %d/%m kl. %H:%M")
         event["summary"] = "Ledig tid"
         event["description"] = ""
         service.events().update(
@@ -349,6 +363,7 @@ def cancel_appointment(slot_id: str) -> dict:
         return {
             "success": True,
             "cancelled_slot_id": slot_id,
+            "original_time": original_time,
             "message": "Tid aflyst — sat tilbage til ledig"
         }
     except Exception as e:
