@@ -37,19 +37,20 @@ DANISH_MONTHS = {
     7: "juli", 8: "august", 9: "september", 10: "oktober", 11: "november", 12: "december"
 }
 
-# Klinikkens åbningstider: (dag_nummer: (åbner_time, lukker_time))
-# 0=mandag, 1=tirsdag, 2=onsdag, 3=torsdag, 4=fredag, 5=lørdag, 6=søndag
+ENGLISH_MONTHS = {
+    1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June",
+    7: "July", 8: "August", 9: "September", 10: "October", 11: "November", 12: "December"
+}
+
 CLINIC_HOURS = {
-    0: (8, 17),   # Mandag
-    1: (8, 17),   # Tirsdag
-    2: (8, 17),   # Onsdag
-    3: (8, 17),   # Torsdag
-    4: (8, 17),   # Fredag
-    # Weekend lukket
+    0: (8, 17),
+    1: (8, 17),
+    2: (8, 17),
+    3: (8, 17),
+    4: (8, 17),
 }
 
 def is_within_clinic_hours(dt: datetime) -> bool:
-    """Tjek om tidspunktet ligger inden for klinikkens åbningstider"""
     weekday = dt.weekday()
     if weekday not in CLINIC_HOURS:
         return False
@@ -61,6 +62,12 @@ def format_danish_date(dt: datetime) -> str:
     day_name = DANISH_DAYS.get(dt.strftime("%A"), dt.strftime("%A"))
     month_name = DANISH_MONTHS.get(dt.month, str(dt.month))
     return f"{day_name} den {dt.day}. {month_name} kl. {dt.strftime('%H:%M')}"
+
+def format_english_date(dt: datetime) -> str:
+    """Formats date in natural English: 'Tuesday April 21 at 14:00'"""
+    day_name = dt.strftime("%A")
+    month_name = ENGLISH_MONTHS.get(dt.month, str(dt.month))
+    return f"{day_name} {month_name} {dt.day} at {dt.strftime('%H:%M')}"
 
 def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -156,7 +163,6 @@ def get_calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 def send_sms(to_phone: str, message: str) -> bool:
-    """Send SMS via Twilio. Håndterer danske numre korrekt."""
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_PHONE_NUMBER:
         print("[SMS] Twilio ikke konfigureret — skipper SMS")
         return False
@@ -187,7 +193,6 @@ def send_sms(to_phone: str, message: str) -> bool:
         return False
 
 def get_patient_phone(patient_id: int) -> str:
-    """Hent patientens telefonnummer fra databasen"""
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -303,6 +308,7 @@ def get_patient_bookings(patient_id: int) -> dict:
             b = dict(b)
             if b["appointment_time"]:
                 b["display"] = format_danish_date(b["appointment_time"])
+                b["display_en"] = format_english_date(b["appointment_time"])
             result.append(b)
         return {"bookings": result}
     except Exception as e:
@@ -340,21 +346,22 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude
             start = event["start"].get("dateTime", "")
             dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
             
-            # Filtrer: kun inden for klinikkens åbningstider
             if not is_within_clinic_hours(dt):
                 print(f"[FILTER] Sprang over tid uden for åbningstid: {format_danish_date(dt)}")
                 continue
             
             if preferred_day:
-                day_name = DANISH_DAYS.get(dt.strftime("%A"), "").lower()
-                if preferred_day.lower() not in day_name:
+                day_name_da = DANISH_DAYS.get(dt.strftime("%A"), "").lower()
+                day_name_en = dt.strftime("%A").lower()
+                if preferred_day.lower() not in day_name_da and preferred_day.lower() not in day_name_en:
                     continue
             display_title = event.get("summary", "Ledig tid")
             available.append({
                 "slot_id": slot_id,
                 "start": start,
                 "dentist": display_title.replace("Ledig tid", "").replace("-", "").strip() or "Første ledige",
-                "display": format_danish_date(dt)
+                "display": format_danish_date(dt),
+                "display_en": format_english_date(dt)
             })
         if not available:
             return {"available_times": [], "message": "Ingen ledige tider fundet"}
@@ -364,9 +371,9 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude
         return {"error": str(e), "message": "Teknisk fejl ved hentning af tider"}
 
 @mcp.tool()
-def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False, dentist_name: str = "", moved_from: str = "") -> dict:
-    """Book en ledig tid og gem i database. Sender SMS-bekræftelse."""
-    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, dentist={dentist_name}, moved_from={moved_from}")
+def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False, dentist_name: str = "", moved_from: str = "", language: str = "da") -> dict:
+    """Book en ledig tid og send SMS-bekræftelse. language='da' eller 'en' styrer SMS-sproget."""
+    print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, dentist={dentist_name}, moved_from={moved_from}, language={language}")
     try:
         service = get_calendar_service()
         event = service.events().get(
@@ -385,6 +392,8 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         ]
         if moved_from:
             description_parts.append(f"Flyttet fra: {moved_from}")
+        if language == "en":
+            description_parts.append("Sprog: Engelsk")
         event["description"] = "\n".join(description_parts)
         updated_event = service.events().update(
             calendarId=CALENDAR_ID,
@@ -393,7 +402,8 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         ).execute()
         start = updated_event["start"].get("dateTime", "")
         appointment_time = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        display = format_danish_date(appointment_time)
+        display_da = format_danish_date(appointment_time)
+        display_en = format_english_date(appointment_time)
         conn = get_db()
         cur = conn.cursor()
         cur.execute("""
@@ -415,39 +425,52 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         patient_phone = get_patient_phone(patient_id)
         if patient_phone:
             first_name = patient_name.split()[0]
-            dentist_text = f" hos {dentist_name}" if dentist_name else ""
-            purpose_text = f" — {purpose}" if purpose else ""
-            sms_message = (
-                f"Kære {first_name}! "
-                f"Din tid hos Tandlægeklinikken er bekræftet: {display}{dentist_text}{purpose_text}. "
-                f"Adresse: 3. sal, Nørregade. "
-                f"Skal du aflyse eller flytte? Ring til os på 12345678. "
-                f"Vi glæder os til at se dig."
-            )
+            if language == "en":
+                dentist_text = f" with {dentist_name}" if dentist_name else ""
+                purpose_text = f" — {purpose}" if purpose else ""
+                sms_message = (
+                    f"Dear {first_name}! "
+                    f"Your appointment at the Dental Clinic is confirmed: {display_en}{dentist_text}{purpose_text}. "
+                    f"Address: 3rd floor, Nørregade. "
+                    f"Need to cancel or reschedule? Call us at 12345678. "
+                    f"We look forward to seeing you."
+                )
+            else:
+                dentist_text = f" hos {dentist_name}" if dentist_name else ""
+                purpose_text = f" — {purpose}" if purpose else ""
+                sms_message = (
+                    f"Kære {first_name}! "
+                    f"Din tid hos Tandlægeklinikken er bekræftet: {display_da}{dentist_text}{purpose_text}. "
+                    f"Adresse: 3. sal, Nørregade. "
+                    f"Skal du aflyse eller flytte? Ring til os på 12345678. "
+                    f"Vi glæder os til at se dig."
+                )
             send_sms(patient_phone, sms_message)
         
         return {
             "success": True,
-            "message": f"Booket til {patient_name} — {display}"
+            "message": f"Booket til {patient_name} — {display_da}"
         }
     except Exception as e:
         print(f"[ERROR] book_appointment: {e}")
         return {"success": False, "error": str(e)}
 
 @mcp.tool()
-def cancel_appointment(slot_id: str) -> dict:
-    """Aflys en booking i kalender og opdater database. Sender SMS-bekræftelse til den KORREKTE patient."""
-    print(f"[TOOL] cancel_appointment: slot={slot_id}")
+def cancel_appointment(slot_id: str, language: str = "da") -> dict:
+    """Aflys en booking. language='da' eller 'en' styrer SMS-sproget."""
+    print(f"[TOOL] cancel_appointment: slot={slot_id}, language={language}")
     try:
         service = get_calendar_service()
         event = service.events().get(
             calendarId=CALENDAR_ID,
             eventId=slot_id
         ).execute()
-        original_time = ""
+        original_time_da = ""
+        original_time_en = ""
         if event.get("start", {}).get("dateTime"):
             dt = datetime.fromisoformat(event["start"]["dateTime"].replace("Z", "+00:00"))
-            original_time = format_danish_date(dt)
+            original_time_da = format_danish_date(dt)
+            original_time_en = format_english_date(dt)
         
         conn = get_db()
         cur = conn.cursor()
@@ -489,12 +512,20 @@ def cancel_appointment(slot_id: str) -> dict:
         
         if patient_row and patient_row["phone"]:
             first_name = patient_row["name"].split()[0] if patient_row["name"] else ""
-            sms_message = (
-                f"Kære {first_name}! "
-                f"Din tid {original_time} er aflyst. "
-                f"Vil du booke en ny tid? Ring til os på 12345678. "
-                f"— Tandlægeklinikken"
-            )
+            if language == "en":
+                sms_message = (
+                    f"Dear {first_name}! "
+                    f"Your appointment {original_time_en} has been cancelled. "
+                    f"Would you like to book a new one? Call us at 12345678. "
+                    f"— The Dental Clinic"
+                )
+            else:
+                sms_message = (
+                    f"Kære {first_name}! "
+                    f"Din tid {original_time_da} er aflyst. "
+                    f"Vil du booke en ny tid? Ring til os på 12345678. "
+                    f"— Tandlægeklinikken"
+                )
             send_sms(patient_row["phone"], sms_message)
         else:
             print(f"[SMS] Kunne ikke finde aktiv patient for slot {slot_id} — ingen SMS sendt")
@@ -502,7 +533,7 @@ def cancel_appointment(slot_id: str) -> dict:
         return {
             "success": True,
             "cancelled_slot_id": slot_id,
-            "original_time": original_time,
+            "original_time": original_time_da,
             "message": "Tid aflyst — sat tilbage til ledig"
         }
     except Exception as e:
