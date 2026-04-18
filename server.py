@@ -142,12 +142,10 @@ def send_sms(to_phone: str, message: str) -> bool:
         print("[SMS] Twilio ikke konfigureret — skipper SMS")
         return False
     try:
-        # Rens nummer for alt der ikke er cifre eller +
         phone_clean = "".join(c for c in to_phone.strip() if c.isdigit() or c == "+")
         has_plus = phone_clean.startswith("+")
         digits_only = phone_clean.lstrip("+")
         
-        # Håndter danske numre korrekt
         if digits_only.startswith("45") and len(digits_only) == 10:
             final_number = "+" + digits_only
         elif len(digits_only) == 8:
@@ -373,6 +371,13 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         display = format_danish_date(appointment_time)
         conn = get_db()
         cur = conn.cursor()
+        # Marker eventuelle tidligere bookinger på samme slot som cancelled
+        # Dette forhindrer duplikater når samme tid genbookes
+        cur.execute("""
+            UPDATE bookings 
+            SET status = 'cancelled' 
+            WHERE calendar_event_id = %s AND status = 'booked'
+        """, (slot_id,))
         final_purpose = purpose
         if moved_from:
             final_purpose = f"{purpose} (flyttet fra {moved_from})"
@@ -408,7 +413,7 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
 
 @mcp.tool()
 def cancel_appointment(slot_id: str) -> dict:
-    """Aflys en booking i kalender og opdater database. Sender SMS-bekræftelse."""
+    """Aflys en booking i kalender og opdater database. Sender SMS-bekræftelse til den KORREKTE patient."""
     print(f"[TOOL] cancel_appointment: slot={slot_id}")
     try:
         service = get_calendar_service()
@@ -423,13 +428,19 @@ def cancel_appointment(slot_id: str) -> dict:
         
         conn = get_db()
         cur = conn.cursor()
+        # VIGTIGT: Find kun den AKTIVE booking (status='booked'), ikke gamle aflyste
         cur.execute("""
-            SELECT p.phone, p.name 
+            SELECT p.phone, p.name, b.id as booking_id
             FROM bookings b
             JOIN patients p ON b.patient_id = p.id
-            WHERE b.calendar_event_id = %s
+            WHERE b.calendar_event_id = %s AND b.status = 'booked'
+            ORDER BY b.created_at DESC
+            LIMIT 1
         """, (slot_id,))
         patient_row = cur.fetchone()
+        
+        if not patient_row:
+            print(f"[WARN] Ingen aktiv booking fundet for slot {slot_id}")
         
         event["summary"] = "Ledig tid"
         event["description"] = ""
@@ -439,10 +450,19 @@ def cancel_appointment(slot_id: str) -> dict:
             body=event
         ).execute()
         
-        cur.execute("""
-            UPDATE bookings SET status = 'cancelled'
-            WHERE calendar_event_id = %s
-        """, (slot_id,))
+        # Marker KUN den aktive booking som cancelled
+        if patient_row:
+            cur.execute("""
+                UPDATE bookings SET status = 'cancelled'
+                WHERE id = %s
+            """, (patient_row["booking_id"],))
+        else:
+            # Fallback: markér alle bookinger for dette slot som cancelled
+            cur.execute("""
+                UPDATE bookings SET status = 'cancelled'
+                WHERE calendar_event_id = %s AND status = 'booked'
+            """, (slot_id,))
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -457,7 +477,7 @@ def cancel_appointment(slot_id: str) -> dict:
             )
             send_sms(patient_row["phone"], sms_message)
         else:
-            print(f"[SMS] Kunne ikke finde patient-info for slot {slot_id} — ingen SMS sendt")
+            print(f"[SMS] Kunne ikke finde aktiv patient for slot {slot_id} — ingen SMS sendt")
         
         return {
             "success": True,
