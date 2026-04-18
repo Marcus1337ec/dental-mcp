@@ -27,6 +27,22 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
 
+DANISH_DAYS = {
+    "Monday": "mandag", "Tuesday": "tirsdag", "Wednesday": "onsdag",
+    "Thursday": "torsdag", "Friday": "fredag", "Saturday": "lørdag", "Sunday": "søndag"
+}
+
+DANISH_MONTHS = {
+    1: "januar", 2: "februar", 3: "marts", 4: "april", 5: "maj", 6: "juni",
+    7: "juli", 8: "august", 9: "september", 10: "oktober", 11: "november", 12: "december"
+}
+
+def format_danish_date(dt: datetime) -> str:
+    """Formaterer dato på naturligt dansk: 'tirsdag den 21. april kl. 14:00'"""
+    day_name = DANISH_DAYS.get(dt.strftime("%A"), dt.strftime("%A"))
+    month_name = DANISH_MONTHS.get(dt.month, str(dt.month))
+    return f"{day_name} den {dt.day}. {month_name} kl. {dt.strftime('%H:%M')}"
+
 def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
@@ -260,7 +276,7 @@ def get_patient_bookings(patient_id: int) -> dict:
         for b in bookings:
             b = dict(b)
             if b["appointment_time"]:
-                b["display"] = b["appointment_time"].strftime("%A den %d/%m kl. %H:%M")
+                b["display"] = format_danish_date(b["appointment_time"])
             result.append(b)
         return {"bookings": result}
     except Exception as e:
@@ -269,7 +285,7 @@ def get_patient_bookings(patient_id: int) -> dict:
 
 @mcp.tool()
 def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude_slot_id: str = "") -> dict:
-    """Hent ledige tider fra Google Calendar — op til 30 dage frem. Filtrer på dag og/eller tandlæge."""
+    """Hent ledige tider fra Google Calendar — op til 30 dage frem."""
     print(f"[TOOL] get_available_times: preferred_day={preferred_day}, dentist={dentist_name}, exclude={exclude_slot_id}")
     try:
         service = get_calendar_service()
@@ -296,14 +312,9 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude
                 if dentist_name.lower() not in title:
                     continue
             start = event["start"].get("dateTime", "")
+            dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
             if preferred_day:
-                dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                danish_days = {
-                    "monday": "mandag", "tuesday": "tirsdag",
-                    "wednesday": "onsdag", "thursday": "torsdag",
-                    "friday": "fredag"
-                }
-                day_name = danish_days.get(dt.strftime("%A").lower(), "")
+                day_name = DANISH_DAYS.get(dt.strftime("%A"), "").lower()
                 if preferred_day.lower() not in day_name:
                     continue
             display_title = event.get("summary", "Ledig tid")
@@ -311,9 +322,7 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude
                 "slot_id": slot_id,
                 "start": start,
                 "dentist": display_title.replace("Ledig tid", "").replace("-", "").strip() or "Første ledige",
-                "display": datetime.fromisoformat(
-                    start.replace("Z", "+00:00")
-                ).strftime("%A den %d/%m kl. %H:%M")
+                "display": format_danish_date(dt)
             })
         if not available:
             return {"available_times": [], "message": "Ingen ledige tider fundet"}
@@ -324,7 +333,7 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude
 
 @mcp.tool()
 def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: str = "", is_new_patient: bool = False, dentist_name: str = "", moved_from: str = "") -> dict:
-    """Book en ledig tid og gem i database. moved_from bruges hvis tiden er flyttet. Sender SMS-bekræftelse."""
+    """Book en ledig tid og gem i database. Sender SMS-bekræftelse."""
     print(f"[TOOL] book_appointment: {patient_name}, slot={slot_id}, purpose={purpose}, dentist={dentist_name}, moved_from={moved_from}")
     try:
         service = get_calendar_service()
@@ -352,7 +361,7 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         ).execute()
         start = updated_event["start"].get("dateTime", "")
         appointment_time = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        display = appointment_time.strftime("%A den %d/%m kl. %H:%M")
+        display = format_danish_date(appointment_time)
         conn = get_db()
         cur = conn.cursor()
         final_purpose = purpose
@@ -391,7 +400,7 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
 
 @mcp.tool()
 def cancel_appointment(slot_id: str) -> dict:
-    """Aflys en booking i kalender og opdater database. Sender SMS-bekræftelse på aflysning."""
+    """Aflys en booking i kalender og opdater database. Sender SMS-bekræftelse."""
     print(f"[TOOL] cancel_appointment: slot={slot_id}")
     try:
         service = get_calendar_service()
@@ -402,9 +411,8 @@ def cancel_appointment(slot_id: str) -> dict:
         original_time = ""
         if event.get("start", {}).get("dateTime"):
             dt = datetime.fromisoformat(event["start"]["dateTime"].replace("Z", "+00:00"))
-            original_time = dt.strftime("%A den %d/%m kl. %H:%M")
+            original_time = format_danish_date(dt)
         
-        # Find patient før vi ændrer begivenheden
         conn = get_db()
         cur = conn.cursor()
         cur.execute("""
@@ -431,7 +439,6 @@ def cancel_appointment(slot_id: str) -> dict:
         cur.close()
         conn.close()
         
-        # Send SMS om aflysning
         if patient_row and patient_row["phone"]:
             first_name = patient_row["name"].split()[0] if patient_row["name"] else ""
             sms_message = (
