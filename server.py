@@ -137,24 +137,33 @@ def get_calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 def send_sms(to_phone: str, message: str) -> bool:
-    """Send SMS via Twilio. Returnerer True hvis det lykkes."""
+    """Send SMS via Twilio. Håndterer danske numre korrekt."""
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_PHONE_NUMBER:
         print("[SMS] Twilio ikke konfigureret — skipper SMS")
         return False
     try:
-        phone_clean = to_phone.strip().replace(" ", "")
-        if not phone_clean.startswith("+"):
-            if phone_clean.startswith("45"):
-                phone_clean = "+" + phone_clean
-            else:
-                phone_clean = "+45" + phone_clean
+        # Rens nummer for alt der ikke er cifre eller +
+        phone_clean = "".join(c for c in to_phone.strip() if c.isdigit() or c == "+")
+        has_plus = phone_clean.startswith("+")
+        digits_only = phone_clean.lstrip("+")
+        
+        # Håndter danske numre korrekt
+        if digits_only.startswith("45") and len(digits_only) == 10:
+            final_number = "+" + digits_only
+        elif len(digits_only) == 8:
+            final_number = "+45" + digits_only
+        else:
+            final_number = phone_clean if has_plus else "+" + digits_only
+        
+        print(f"[SMS] Normaliseret nummer: {to_phone} → {final_number}")
+        
         client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         msg = client.messages.create(
             body=message,
             from_=TWILIO_PHONE_NUMBER,
-            to=phone_clean
+            to=final_number
         )
-        print(f"[SMS] Sendt til {phone_clean} — SID: {msg.sid}")
+        print(f"[SMS] Sendt til {final_number} — SID: {msg.sid}")
         return True
     except Exception as e:
         print(f"[SMS ERROR] {e}")
@@ -375,7 +384,6 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         cur.close()
         conn.close()
         
-        # Send SMS-bekræftelse
         patient_phone = get_patient_phone(patient_id)
         if patient_phone:
             first_name = patient_name.split()[0]
@@ -448,6 +456,8 @@ def cancel_appointment(slot_id: str) -> dict:
                 f"— Tandlægeklinikken"
             )
             send_sms(patient_row["phone"], sms_message)
+        else:
+            print(f"[SMS] Kunne ikke finde patient-info for slot {slot_id} — ingen SMS sendt")
         
         return {
             "success": True,
