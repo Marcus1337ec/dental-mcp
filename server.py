@@ -369,13 +369,15 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         # Send SMS-bekræftelse
         patient_phone = get_patient_phone(patient_id)
         if patient_phone:
+            first_name = patient_name.split()[0]
             dentist_text = f" hos {dentist_name}" if dentist_name else ""
+            purpose_text = f" — {purpose}" if purpose else ""
             sms_message = (
-                f"Hej {patient_name.split()[0]}! "
-                f"Din tid er bekræftet: {display}{dentist_text}. "
-                f"Formål: {purpose if purpose else 'Ikke angivet'}. "
+                f"Kære {first_name}! "
+                f"Din tid hos Tandlægeklinikken er bekræftet: {display}{dentist_text}{purpose_text}. "
                 f"Adresse: 3. sal, Nørregade. "
-                f"Vi ses! — Tandlægeklinikken"
+                f"Skal du aflyse eller flytte? Ring til os på 12345678. "
+                f"Vi glæder os til at se dig."
             )
             send_sms(patient_phone, sms_message)
         
@@ -398,11 +400,9 @@ def cancel_appointment(slot_id: str) -> dict:
             eventId=slot_id
         ).execute()
         original_time = ""
-        patient_name_for_sms = ""
         if event.get("start", {}).get("dateTime"):
             dt = datetime.fromisoformat(event["start"]["dateTime"].replace("Z", "+00:00"))
             original_time = dt.strftime("%A den %d/%m kl. %H:%M")
-        patient_name_for_sms = event.get("summary", "")
         
         # Find patient før vi ændrer begivenheden
         conn = get_db()
@@ -435,9 +435,9 @@ def cancel_appointment(slot_id: str) -> dict:
         if patient_row and patient_row["phone"]:
             first_name = patient_row["name"].split()[0] if patient_row["name"] else ""
             sms_message = (
-                f"Hej {first_name}! "
+                f"Kære {first_name}! "
                 f"Din tid {original_time} er aflyst. "
-                f"Kontakt os hvis du vil booke en ny tid. "
+                f"Vil du booke en ny tid? Ring til os på 12345678. "
                 f"— Tandlægeklinikken"
             )
             send_sms(patient_row["phone"], sms_message)
