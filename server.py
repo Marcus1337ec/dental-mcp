@@ -37,6 +37,25 @@ DANISH_MONTHS = {
     7: "juli", 8: "august", 9: "september", 10: "oktober", 11: "november", 12: "december"
 }
 
+# Klinikkens åbningstider: (dag_nummer: (åbner_time, lukker_time))
+# 0=mandag, 1=tirsdag, 2=onsdag, 3=torsdag, 4=fredag, 5=lørdag, 6=søndag
+CLINIC_HOURS = {
+    0: (8, 17),   # Mandag
+    1: (8, 17),   # Tirsdag
+    2: (8, 17),   # Onsdag
+    3: (8, 17),   # Torsdag
+    4: (8, 17),   # Fredag
+    # Weekend lukket
+}
+
+def is_within_clinic_hours(dt: datetime) -> bool:
+    """Tjek om tidspunktet ligger inden for klinikkens åbningstider"""
+    weekday = dt.weekday()
+    if weekday not in CLINIC_HOURS:
+        return False
+    open_hour, close_hour = CLINIC_HOURS[weekday]
+    return open_hour <= dt.hour < close_hour
+
 def format_danish_date(dt: datetime) -> str:
     """Formaterer dato på naturligt dansk: 'tirsdag den 21. april kl. 14:00'"""
     day_name = DANISH_DAYS.get(dt.strftime("%A"), dt.strftime("%A"))
@@ -292,7 +311,7 @@ def get_patient_bookings(patient_id: int) -> dict:
 
 @mcp.tool()
 def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude_slot_id: str = "") -> dict:
-    """Hent ledige tider fra Google Calendar — op til 30 dage frem."""
+    """Hent ledige tider fra Google Calendar — kun inden for klinikkens åbningstider (man-fre 8-17)."""
     print(f"[TOOL] get_available_times: preferred_day={preferred_day}, dentist={dentist_name}, exclude={exclude_slot_id}")
     try:
         service = get_calendar_service()
@@ -320,6 +339,12 @@ def get_available_times(preferred_day: str = "", dentist_name: str = "", exclude
                     continue
             start = event["start"].get("dateTime", "")
             dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            
+            # Filtrer: kun inden for klinikkens åbningstider
+            if not is_within_clinic_hours(dt):
+                print(f"[FILTER] Sprang over tid uden for åbningstid: {format_danish_date(dt)}")
+                continue
+            
             if preferred_day:
                 day_name = DANISH_DAYS.get(dt.strftime("%A"), "").lower()
                 if preferred_day.lower() not in day_name:
@@ -371,8 +396,6 @@ def book_appointment(patient_id: int, patient_name: str, slot_id: str, purpose: 
         display = format_danish_date(appointment_time)
         conn = get_db()
         cur = conn.cursor()
-        # Marker eventuelle tidligere bookinger på samme slot som cancelled
-        # Dette forhindrer duplikater når samme tid genbookes
         cur.execute("""
             UPDATE bookings 
             SET status = 'cancelled' 
@@ -428,7 +451,6 @@ def cancel_appointment(slot_id: str) -> dict:
         
         conn = get_db()
         cur = conn.cursor()
-        # VIGTIGT: Find kun den AKTIVE booking (status='booked'), ikke gamle aflyste
         cur.execute("""
             SELECT p.phone, p.name, b.id as booking_id
             FROM bookings b
@@ -450,14 +472,12 @@ def cancel_appointment(slot_id: str) -> dict:
             body=event
         ).execute()
         
-        # Marker KUN den aktive booking som cancelled
         if patient_row:
             cur.execute("""
                 UPDATE bookings SET status = 'cancelled'
                 WHERE id = %s
             """, (patient_row["booking_id"],))
         else:
-            # Fallback: markér alle bookinger for dette slot som cancelled
             cur.execute("""
                 UPDATE bookings SET status = 'cancelled'
                 WHERE calendar_event_id = %s AND status = 'booked'
